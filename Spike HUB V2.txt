@@ -1,0 +1,685 @@
+local RS = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer
+local Net = RS:WaitForChild("Modules", 15):WaitForChild("Net", 15)
+local Atk = Net:WaitForChild("RE/RegisterAttack", 15)
+local Hit = Net:WaitForChild("RE/RegisterHit", 15)
+local CommF = RS:WaitForChild("Remotes", 15):WaitForChild("CommF_", 15)
+
+local token = tostring(lp.UserId):sub(2, 4) .. tostring(math.random(10000, 99999))
+pcall(function() Hit:FireServer(token) end)
+
+local Cfg = {
+    On = false, Radius = 250, Format = "Pairs", Bring = false, GatherRadius = 300,
+    Farm = false, Quest = false, Raid = false, RaidType = "Flame", FarmRadius = 1500, Height = 10, Speed = 150,
+    Weapon = "Melee", NoClip = true, Batch = 30, Unstore = true,
+}
+local center = nil
+local questMob = nil
+local Window
+
+local function active() return Cfg.Farm or Cfg.Quest or Cfg.Raid end
+local function getRoot()
+    local char = lp.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+local function notify(t, c)
+    if Window then pcall(function() Window:Notify({ Title = t, Content = c }) end) end
+end
+
+local function mobMatch(mob)
+    if Cfg.Quest and not Cfg.Farm and not Cfg.Raid and questMob then return mob.Name == questMob end
+    return true
+end
+
+local function targets()
+    local list = {}
+    local root = getRoot()
+    local folder = workspace:FindFirstChild("Enemies")
+    if not (root and folder) then return list end
+    for _, mob in ipairs(folder:GetChildren()) do
+        local hum = mob:FindFirstChildOfClass("Humanoid")
+        local head = mob:FindFirstChild("Head") or mob:FindFirstChild("HumanoidRootPart")
+        if hum and hum.Health > 0 and head and (head.Position - root.Position).Magnitude <= Cfg.Radius then
+            table.insert(list, { mob = mob, head = head })
+            if #list >= 30 then break end
+        end
+    end
+    return list
+end
+
+local function fireAura()
+    local list = targets()
+    if #list == 0 then return end
+    local n = math.max(1, Cfg.Batch)
+    for i = 1, #list, n do
+        local chunk = {}
+        for j = i, math.min(i + n - 1, #list) do
+            if Cfg.Format == "Pairs" then
+                chunk[#chunk + 1] = { list[j].mob, list[j].head }
+            else
+                chunk[#chunk + 1] = list[j].mob
+            end
+        end
+        Atk:FireServer(0)
+        Hit:FireServer(list[i].head, chunk, nil, token)
+    end
+end
+
+-- AoE Kill Aura (also active while any auto farm is on)
+task.spawn(function()
+    while true do
+        task.wait(0.15)
+        if Cfg.On or active() then
+            pcall(fireAura)
+        end
+    end
+end)
+
+-- Bring Mobs (also active while farming)
+task.spawn(function()
+    local lastSim = 0
+    while true do
+        task.wait(0.2)
+        if Cfg.Bring or active() then
+            pcall(function()
+                local root = getRoot()
+                local folder = workspace:FindFirstChild("Enemies")
+                if not (root and folder) then return end
+                if os.clock() - lastSim > 2 then
+                    lastSim = os.clock()
+                    if sethiddenproperty then pcall(sethiddenproperty, lp, "SimulationRadius", 1e9) end
+                end
+                local farming = active()
+                local pos
+                if farming and center then
+                    pos = center
+                else
+                    pos = (root.CFrame * CFrame.new(0, 0, -8)).Position
+                end
+                local radius = Cfg.GatherRadius
+                if farming then
+                    local flat = Vector3.new(root.Position.X - pos.X, 0, root.Position.Z - pos.Z)
+                    if flat.Magnitude > 40 then return end
+                end
+                local point = CFrame.new(pos)
+                local n = 0
+                for _, mob in ipairs(folder:GetChildren()) do
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mroot = mob:FindFirstChild("HumanoidRootPart")
+                    if hum and hum.Health > 0 and mroot and (not farming or mobMatch(mob))
+                        and (mroot.Position - root.Position).Magnitude <= radius then
+                        if (mroot.Position - pos).Magnitude > 3 then
+                            mroot.CFrame = point
+                            mroot.AssemblyLinearVelocity = Vector3.zero
+                        end
+                        n += 1
+                        if n >= 40 then break end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+local function aliveNear(c, r, filter)
+    local folder = workspace:FindFirstChild("Enemies")
+    if not folder then return false end
+    for _, mob in ipairs(folder:GetChildren()) do
+        local hum = mob:FindFirstChildOfClass("Humanoid")
+        local mr = mob:FindFirstChild("HumanoidRootPart")
+        if hum and hum.Health > 0 and mr and (not filter or mob.Name == filter)
+            and (mr.Position - c).Magnitude <= r then return true end
+    end
+    return false
+end
+
+-- Auto Farm Nearest: choose pile centre
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        if Cfg.Farm then
+            pcall(function()
+                local root = getRoot()
+                local folder = workspace:FindFirstChild("Enemies")
+                if not (root and folder) then return end
+                if center and aliveNear(center, 40) then return end
+                local best, bd = nil, Cfg.FarmRadius
+                for _, mob in ipairs(folder:GetChildren()) do
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mr = mob:FindFirstChild("HumanoidRootPart")
+                    if hum and hum.Health > 0 and mr then
+                        local d = (mr.Position - root.Position).Magnitude
+                        if d < bd then bd, best = d, mr end
+                    end
+                end
+                center = best and best.Position or nil
+            end)
+        elseif not Cfg.Quest and not Cfg.Raid then
+            center = nil
+        end
+    end
+end)
+
+-- Unstore fruits (unverified: LoadFruit remote and inventory format are from memory)
+-- Only non-legendary, non-mythical fruits (Common / Uncommon / Rare)
+local FallbackFruits = {
+    "Rocket-Rocket", "Spin-Spin", "Blade-Blade", "Spring-Spring", "Bomb-Bomb", "Smoke-Smoke", "Spike-Spike",
+    "Flame-Flame", "Ice-Ice", "Sand-Sand", "Dark-Dark", "Diamond-Diamond",
+    "Light-Light", "Rubber-Rubber", "Ghost-Ghost", "Magma-Magma",
+}
+local AllowedNames = {}
+for _, n in ipairs(FallbackFruits) do AllowedNames[n] = true end
+
+local function fruitList()
+    local names = {}
+    for _, call in ipairs({ "getInventoryFruits", "getInventory" }) do
+        local ok, res = pcall(function() return CommF:InvokeServer(call) end)
+        if ok and type(res) == "table" then
+            for _, item in pairs(res) do
+                if type(item) == "table" then
+                    local name = item.Name
+                    local isFruit = item.Type == nil or item.Type == "Blox Fruit"
+                    local rar = tonumber(item.Rarity)
+                    if type(name) == "string" and isFruit then
+                        if (rar and rar <= 2) or (not rar and AllowedNames[name]) then
+                            table.insert(names, name)
+                        end
+                    end
+                end
+            end
+            if #names > 0 then return names end
+        end
+    end
+    return FallbackFruits
+end
+
+local function hasFruitTool(name)
+    local char = lp.Character
+    if char and char:FindFirstChild(name) then return true end
+    return lp.Backpack:FindFirstChild(name) ~= nil
+end
+
+local lastUnstore = 0
+local function unstoreFruits(force)
+    if not force and os.clock() - lastUnstore < 30 then return end
+    lastUnstore = os.clock()
+    local taken = 0
+    for _, name in ipairs(fruitList()) do
+        if not hasFruitTool(name) then
+            local ok, res = pcall(function() return CommF:InvokeServer("LoadFruit", name) end)
+            if ok and res then taken += 1 end
+            task.wait(0.4)
+        end
+    end
+    return taken
+end
+
+-- Auto Raid (unverified: chip purchase, start button and island names are from memory)
+local summonDetector
+local function findSummon()
+    if summonDetector and summonDetector.Parent then return summonDetector end
+    local map = workspace:FindFirstChild("Map")
+    if not map then return nil end
+    for _, d in ipairs(map:GetDescendants()) do
+        if d:IsA("ClickDetector") and d:GetFullName():find("RaidSummon", 1, true) then
+            summonDetector = d
+            return d
+        end
+    end
+end
+
+local function raidIslands()
+    local loc = workspace:FindFirstChild("_WorldOrigin")
+    loc = loc and loc:FindFirstChild("Locations")
+    local list = {}
+    if not loc then return list end
+    for i = 5, 1, -1 do
+        local isl = loc:FindFirstChild("Island " .. i)
+        if isl then table.insert(list, isl) end
+    end
+    return list
+end
+
+local function hasChip()
+    local char = lp.Character
+    if char and char:FindFirstChild("Special Microchip") then return true end
+    return lp.Backpack:FindFirstChild("Special Microchip") ~= nil
+end
+
+task.spawn(function()
+    local lastStart, warned = 0, false
+    local returnCF
+    while true do
+        task.wait(0.4)
+        if Cfg.Raid and not Cfg.Farm then
+            pcall(function()
+                local root = getRoot()
+                local folder = workspace:FindFirstChild("Enemies")
+                if not (root and folder) then return end
+                local islands = raidIslands()
+                if #islands == 0 then
+                    -- no raid running: unstore fruits, buy chip and press the start button
+                    center = nil
+                    if returnCF then
+                        root.CFrame = returnCF
+                        root.AssemblyLinearVelocity = Vector3.zero
+                        returnCF = nil
+                    end
+                    if os.clock() - lastStart < 20 then return end
+                    lastStart = os.clock()
+                    if not hasChip() then
+                        if Cfg.Unstore then unstoreFruits(false) end
+                        CommF:InvokeServer("RaidsNpc", "Select", Cfg.RaidType)
+                        task.wait(0.5)
+                    end
+                    local cd = findSummon()
+                    if cd and fireclickdetector then
+                        local part = cd.Parent
+                        if part and part:IsA("BasePart") then
+                            root.CFrame = part.CFrame * CFrame.new(0, 3, 6)
+                            task.wait(0.4)
+                        end
+                        fireclickdetector(cd)
+                        warned = false
+                    elseif not warned then
+                        warned = true
+                        notify("Auto Raid", "Raid start button not found in this sea.")
+                    end
+                    return
+                end
+                if not returnCF then returnCF = root.CFrame end
+                -- raid running: go for nearest mob, otherwise fly to the newest island
+                if center and aliveNear(center, 40) then return end
+                local best, bd = nil, 3000
+                for _, mob in ipairs(folder:GetChildren()) do
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mr = mob:FindFirstChild("HumanoidRootPart")
+                    if hum and hum.Health > 0 and mr then
+                        local d = (mr.Position - root.Position).Magnitude
+                        if d < bd then bd, best = d, mr end
+                    end
+                end
+                if best then
+                    center = best.Position
+                else
+                    local isl = islands[1]
+                    local p = isl:IsA("BasePart") and isl.Position or (isl:IsA("Model") and isl:GetPivot().Position)
+                    center = p
+                end
+            end)
+        elseif not Cfg.Quest and not Cfg.Farm then
+            if not Cfg.Raid then warned = false end
+        end
+    end
+end)
+
+-- Auto Farm Level (quests)
+local Quests
+pcall(function() Quests = require(RS:WaitForChild("Quests", 15)) end)
+
+local function spawnFor(mob)
+    local ok, res = pcall(function()
+        local f = workspace:FindFirstChild("_WorldOrigin")
+        f = f and f:FindFirstChild("EnemySpawns")
+        if not f then return nil end
+        for _, s in ipairs(f:GetChildren()) do
+            if s.Name:find(mob, 1, true) then return s end
+        end
+    end)
+    return ok and res or nil
+end
+
+local function seaRange()
+    local pid = game.PlaceId
+    if pid == 2753915549 then return 0, 699 end
+    if pid == 4442272183 then return 700, 1499 end
+    return 1500, math.huge
+end
+
+local function pickQuest()
+    if not Quests then return nil end
+    local lvl = lp:FindFirstChild("Data") and lp.Data:FindFirstChild("Level") and lp.Data.Level.Value or 1
+    local lo, hi = seaRange()
+    local best
+    for key, levels in pairs(Quests) do
+        if type(levels) == "table" then
+            for idx, q in pairs(levels) do
+                if type(q) == "table" and type(q.Task) == "table" and q.LevelReq
+                    and q.LevelReq <= lvl and q.LevelReq >= lo and q.LevelReq <= hi then
+                    local mob, cnt = next(q.Task)
+                    if mob and type(cnt) == "number" and cnt > 1 then
+                        if not best or q.LevelReq > best.req then
+                            best = { key = key, idx = idx, mob = mob, req = q.LevelReq }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function questTracked()
+    local ok, vis = pcall(function()
+        return lp.PlayerGui.Main.Quest.Visible
+    end)
+    return ok and vis
+end
+
+task.spawn(function()
+    local quest, lastPick, lastAccept, warned = nil, 0, 0, false
+    while true do
+        task.wait(0.5)
+        if Cfg.Quest and not Cfg.Farm and not Cfg.Raid then
+            pcall(function()
+                local root = getRoot()
+                local folder = workspace:FindFirstChild("Enemies")
+                if not (root and folder) then return end
+                if not quest or os.clock() - lastPick > 30 then
+                    lastPick = os.clock()
+                    quest = pickQuest()
+                end
+                if not quest then
+                    if not warned then warned = true notify("Auto Farm Level", "No suitable quest found for your level.") end
+                    center = nil
+                    questMob = nil
+                    return
+                end
+                warned = false
+                questMob = quest.mob
+                if not questTracked() and os.clock() - lastAccept > 10 then
+                    lastAccept = os.clock()
+                    CommF:InvokeServer("StartQuest", quest.key, quest.idx)
+                end
+                if center and aliveNear(center, 40, quest.mob) then return end
+                local best, bd = nil, math.huge
+                for _, mob in ipairs(folder:GetChildren()) do
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mr = mob:FindFirstChild("HumanoidRootPart")
+                    if mob.Name == quest.mob and hum and hum.Health > 0 and mr then
+                        local d = (mr.Position - root.Position).Magnitude
+                        if d < bd then bd, best = d, mr end
+                    end
+                end
+                if best then
+                    center = best.Position
+                else
+                    local s = spawnFor(quest.mob)
+                    center = s and s.Position or nil
+                end
+            end)
+        elseif not Cfg.Quest then
+            questMob = nil
+        end
+    end
+end)
+
+-- auto equip chosen weapon type
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if active() then
+            pcall(function()
+                local char = lp.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if not hum or char:FindFirstChildOfClass("Tool") then return end
+                for _, t in ipairs(lp.Backpack:GetChildren()) do
+                    if t:IsA("Tool") and t.ToolTip == Cfg.Weapon then hum:EquipTool(t) return end
+                end
+            end)
+        end
+    end
+end)
+
+-- flight (smooth, constant speed) above the pile
+RunService.Heartbeat:Connect(function(dt)
+    if not (active() and center) then return end
+    local root = getRoot()
+    if not root then return end
+    local goal = center + Vector3.new(0, Cfg.Height, 0)
+    local diff = goal - root.Position
+    local dist = diff.Magnitude
+    local step = Cfg.Speed * dt
+    local newPos = dist <= step and goal or root.Position + diff.Unit * step
+    root.CFrame = CFrame.lookAt(newPos, newPos - Vector3.new(0, 1, 0) + Vector3.new(0, 0, 0.001))
+    root.AssemblyLinearVelocity = Vector3.zero
+end)
+
+-- noclip while farming
+local lastClip = 0
+local clipped = false
+local function restoreCollide()
+    clipped = false
+    local char = lp.Character
+    if not char then return end
+    for _, p in ipairs(char:GetChildren()) do
+        if p:IsA("BasePart") and (p.Name == "UpperTorso" or p.Name == "LowerTorso" or p.Name == "Torso" or p.Name == "Head") then
+            p.CanCollide = true
+        end
+    end
+end
+RunService.Stepped:Connect(function()
+    if not (active() and Cfg.NoClip and center) then
+        if clipped then restoreCollide() end
+        return
+    end
+    clipped = true
+    if os.clock() - lastClip < 0.25 then return end
+    lastClip = os.clock()
+    local char = lp.Character
+    if not char then return end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
+    end
+end)
+
+-- Put a DIRECT link to your avatar image (png/jpg) here, e.g. from Discord or imgur
+local AVATAR_URL = "https://encrypted-tbn2.gstatic.com/images?q=tbn:ANd9GcTsm2LhyblFnAvecSOvHwuLZfjv2ja9b4zhce0C8dGfB5Ft5iDt"
+
+local UI = loadstring(game:HttpGet("https://api.luamancer.com/ui/v1.lua"))()
+local guiParent = (gethui and gethui()) or game:GetService("CoreGui")
+local before = {}
+for _, c in ipairs(guiParent:GetChildren()) do before[c] = true end
+Window = UI:CreateWindow({ Title = "Spike HUB", Subtitle = "Blox Fruits", Theme = "Forest", Accent = Color3.fromRGB(120, 200, 60), Logo = "swords" })
+
+local mainGui = guiParent:FindFirstChild("LuamancerUi")
+if not mainGui then
+    for _, c in ipairs(guiParent:GetChildren()) do
+        if c:IsA("ScreenGui") and not before[c] and c.Name ~= "LuamancerIsland" then mainGui = c break end
+    end
+end
+
+do
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "AvatarToggle"
+    sg.ResetOnSpawn = false
+    sg.DisplayOrder = 2147483647
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent = guiParent
+    task.spawn(function()
+        while sg.Parent do
+            if mainGui and not mainGui.Parent then break end
+            task.wait(0.3)
+        end
+        Cfg.On = false Cfg.Bring = false Cfg.Farm = false Cfg.Quest = false Cfg.Raid = false center = nil
+        sg:Destroy()
+    end)
+    local btn = Instance.new("ImageButton")
+    btn.Size = UDim2.fromOffset(56, 56)
+    btn.Position = UDim2.new(0, 20, 0.5, -28)
+    btn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    btn.AutoButtonColor = false
+    btn.ScaleType = Enum.ScaleType.Crop
+    btn.Parent = sg
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = btn
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.new(0, 0, 0)
+    stroke.Thickness = 3
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = btn
+    if AVATAR_URL ~= "" and writefile and getcustomasset then
+        pcall(function()
+            writefile("spike_avatar.png", game:HttpGet(AVATAR_URL))
+            btn.Image = getcustomasset("spike_avatar.png")
+        end)
+    end
+    if btn.Image == "" then
+        btn.BackgroundColor3 = Color3.fromRGB(120, 200, 60)
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.fromScale(1, 1)
+        t.BackgroundTransparency = 1
+        t.Text = "S"
+        t.TextScaled = true
+        t.Font = Enum.Font.GothamBold
+        t.TextColor3 = Color3.fromRGB(230, 90, 140)
+        t.Parent = btn
+    end
+    -- hide the library's own small round toggle button (direct children of the window gui only)
+    if mainGui then
+        for _, c in ipairs(mainGui:GetChildren()) do
+            if c:IsA("GuiButton") and c.AbsoluteSize.X <= 80 and c.AbsoluteSize.Y <= 80 then
+                c.Visible = false
+            end
+        end
+    end
+    -- hide the library's "Press RightShift..." hint pill
+    task.spawn(function()
+        for _ = 1, 40 do
+            for _, root in ipairs({ guiParent, game:GetService("CoreGui"), lp:FindFirstChild("PlayerGui") }) do
+                if root then
+                    for _, d in ipairs(root:GetDescendants()) do
+                        if d:IsA("TextLabel") and d.Text:find("Press RightShift", 1, true) then
+                            local top = d
+                            while top.Parent and top.Parent:IsA("GuiObject") and top.Parent.AbsoluteSize.Y < 90 do
+                                top = top.Parent
+                            end
+                            top.Visible = false
+                        end
+                    end
+                end
+            end
+            task.wait(0.25)
+        end
+    end)
+    -- draggable avatar; a click without moving toggles the menu
+    local UIS = game:GetService("UserInputService")
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+    btn.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, moved = true, false
+            dragStart, startPos = i.Position, btn.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - dragStart
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+        end
+    end)
+    local function toggleMenu()
+        if not (mainGui and mainGui.Parent) then
+            mainGui = guiParent:FindFirstChild("LuamancerUi")
+        end
+        if mainGui and mainGui.Parent then
+            local holder = mainGui:FindFirstChild("Holder")
+            local open = mainGui.Enabled and (not holder or holder.Visible)
+            if open then
+                mainGui.Enabled = false
+                if holder then holder.Visible = false end
+            else
+                mainGui.DisplayOrder = math.max(mainGui.DisplayOrder, 100)
+                mainGui.Enabled = true
+                if holder then holder.Visible = true end
+            end
+        else
+            notify("Menu", "Menu window not found.")
+        end
+    end
+    btn.Activated:Connect(function()
+        if moved then return end
+        toggleMenu()
+    end)
+    -- Ctrl (left or right) also toggles the menu
+    local ctrlConn
+    ctrlConn = UIS.InputBegan:Connect(function(i)
+        if i.KeyCode == Enum.KeyCode.LeftControl or i.KeyCode == Enum.KeyCode.RightControl then
+            if UIS:GetFocusedTextBox() then return end
+            toggleMenu()
+        end
+    end)
+    sg.Destroying:Connect(function()
+        if ctrlConn then ctrlConn:Disconnect() end
+    end)
+end
+
+local farmTab = Window:AddTab({ Name = "Farm", Icon = "sword" })
+local fsec = farmTab:AddSection("Auto Farm")
+fsec:AddToggle({ Title = "Auto Farm Level", Description = "Takes the quest for your level and kills its mobs", Icon = "star", Default = false, Callback = function(on)
+    Cfg.Quest = on
+    if not on and not Cfg.Farm and not Cfg.Raid then center = nil end
+end })
+fsec:AddToggle({ Title = "Auto Farm Nearest", Icon = "play", Default = false, Callback = function(on)
+    Cfg.Farm = on
+    if not on and not Cfg.Quest and not Cfg.Raid then center = nil end
+end })
+fsec:AddSlider({ Title = "Farm Radius", Icon = "map-pin", Min = 100, Max = 3000, Default = 1500, Step = 50, Suffix = " studs", Callback = function(v) Cfg.FarmRadius = v end })
+fsec:AddSlider({ Title = "Fly Height", Icon = "rocket", Min = 5, Max = 30, Default = 10, Step = 1, Suffix = " studs", Callback = function(v) Cfg.Height = v end })
+fsec:AddSlider({ Title = "Fly Speed", Icon = "zap", Min = 50, Max = 300, Default = 150, Step = 10, Suffix = " studs/s", Callback = function(v) Cfg.Speed = v end })
+fsec:AddDropdown({ Title = "Attack With", Icon = "swords", Options = { "Melee", "Sword", "Gun", "Blox Fruit" }, Default = "Melee", Callback = function(o) Cfg.Weapon = o end })
+fsec:AddToggle({ Title = "NoClip While Farming", Icon = "eye", Default = true, Callback = function(on) Cfg.NoClip = on end })
+
+local raidTab = Window:AddTab({ Name = "Raids", Icon = "flame" })
+local rsec = raidTab:AddSection("Auto Raid")
+rsec:AddToggle({ Title = "Auto Raid", Description = "Buys a chip, starts the raid and clears it", Icon = "flame", Default = false, Callback = function(on)
+    Cfg.Raid = on
+    if not on and not Cfg.Quest and not Cfg.Farm then center = nil end
+end })
+rsec:AddDropdown({ Title = "Raid Type", Icon = "settings", Options = { "Flame", "Ice", "Quake", "Light", "Dark", "String", "Rumble", "Magma", "Buddha", "Sand", "Phoenix", "Dough" }, Default = "Flame", Callback = function(o) Cfg.RaidType = o end })
+local usec = raidTab:AddSection("Fruits")
+usec:AddToggle({ Title = "Auto Unstore Fruits", Description = "Takes stored fruits before a raid, except legendary and mythical", Icon = "refresh-cw", Default = true, Callback = function(on) Cfg.Unstore = on end })
+usec:AddButton({ Title = "Unstore Now", Icon = "play", Callback = function()
+    task.spawn(function()
+        local n = unstoreFruits(true)
+        notify("Unstore Fruits", "Taken out: " .. tostring(n or 0))
+    end)
+end })
+
+local tab = Window:AddTab({ Name = "Combat", Icon = "swords" })
+local sec = tab:AddSection("Kill Aura")
+sec:AddToggle({ Title = "AoE Kill Aura", Icon = "zap", Default = false, Callback = function(on) Cfg.On = on end })
+sec:AddSlider({ Title = "Aura Radius", Icon = "crosshair", Min = 30, Max = 500, Default = 250, Step = 10, Suffix = " studs", Callback = function(v) Cfg.Radius = v end })
+sec:AddSlider({ Title = "Targets Per Hit", Icon = "swords", Min = 1, Max = 30, Default = 30, Step = 1, Suffix = " mobs", Callback = function(v) Cfg.Batch = v end })
+sec:AddToggle({ Title = "Bring Mobs", Icon = "crosshair", Default = false, Callback = function(on) Cfg.Bring = on end })
+sec:AddSlider({ Title = "Gather Radius", Icon = "map-pin", Min = 60, Max = 1000, Default = 300, Step = 20, Suffix = " studs", Callback = function(v) Cfg.GatherRadius = v end })
+sec:AddDropdown({ Title = "List Format", Icon = "settings", Options = { "Pairs", "Models" }, Default = "Pairs", Callback = function(o) Cfg.Format = o end })
+local tsec = tab:AddSection("Teleport")
+tsec:AddButton({ Title = "Teleport to Temple of Time", Description = "Third Sea only", Icon = "map-pin", Callback = function()
+    if game.PlaceId ~= 7449423635 then
+        notify("Teleport", "Temple of Time is only in the Third Sea.")
+        return
+    end
+    task.spawn(function()
+        local pos = Vector3.new(28286.35546875, 14895.3017578125, 102.62469482421875)
+        pcall(function() CommF:InvokeServer("requestEntrance", pos) end)
+        task.wait(1)
+        local root = getRoot()
+        if root and (root.Position - pos).Magnitude > 300 then
+            root.CFrame = CFrame.new(pos)
+            root.AssemblyLinearVelocity = Vector3.zero
+        end
+        notify("Teleport", "Teleport to Temple of Time sent.")
+    end)
+end })
+sec:AddButton({ Title = "Unload", Icon = "x", Callback = function() Cfg.On = false Cfg.Farm = false Cfg.Quest = false Cfg.Raid = false center = nil Window:Destroy() end })
